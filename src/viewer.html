@@ -632,8 +632,8 @@ $("#right").addEventListener("click", (e) => { if (e.target === $("#right")) $("
 // it started from. Plain visits and clicks move along the branch you are on when the file is already there
 // (the jumplist), and extend it otherwise. Jumping again from an earlier step starts a new branch, so
 // nothing explored is lost. The bar shows one branch: root → current step → where you came back from.
-function addStep(id, parent, line, sym) {
-  S.steps.push({ id, line, sym, parent, kids: [], pick: -1 });
+function addStep(id, parent, line, sym, fline = null) {
+  S.steps.push({ id, line, sym, fline, parent, kids: [], pick: -1 });
   const k = S.steps.length - 1;
   if (parent >= 0) S.steps[parent].kids.push(k);
   return k;
@@ -660,17 +660,36 @@ function visitStep(id, line) {
   const k = onBranch(id);
   setCur(k >= 0 ? k : addStep(id, S.cur, line, null));
 }
+// The first line of the top-level item a line falls in.
+function regionOf(id, line) {
+  let s = 0;
+  for (const x of nodes[id].items) if (x.line <= line && x.line > s) s = x.line;
+  return s;
+}
+// <C-o> inside one buffer is not reported, so after jumps within a file the step you are back on is
+// unknown. Pick the nearest same-file step whose part of the file (its definition, or where you left it
+// for the next step) holds the line the jump started from.
+function sameFileStep(from, fline) {
+  const r = regionOf(from, fline);
+  for (let k = S.cur, kid = -1; k >= 0 && S.steps[k].id === from; kid = k, k = S.steps[k].parent) {
+    const st = S.steps[k];
+    if ((st.line && regionOf(from, st.line) === r) || (kid >= 0 && S.steps[kid].fline && regionOf(from, S.steps[kid].fline) === r)) return k;
+  }
+  return S.cur;
+}
 function jumpStep(from, fline, sym, id, line) {
   let f = S.cur;
-  if (from != null && (f < 0 || S.steps[f].id !== from)) {
+  if (from != null && f >= 0 && S.steps[f].id === from) f = sameFileStep(from, fline);
+  else if (from != null) {
     f = onBranch(from);
     if (f < 0) f = S.steps.findLastIndex((st) => st.id === from);
     if (f < 0) f = addStep(from, S.cur, fline, null);
   }
   // The same hop again: reuse it. A plain visit of the target that got here first: label it.
-  let k = f < 0 ? -1 : (S.steps[f].kids.find((c) => S.steps[c].id === id && (S.steps[c].sym === sym || S.steps[c].sym == null)) ?? -1);
-  if (k >= 0) Object.assign(S.steps[k], { sym, line });
-  else k = addStep(id, f, line, sym);
+  const same = (c) => S.steps[c].id === id && ((S.steps[c].sym === sym && S.steps[c].line === line) || S.steps[c].sym == null);
+  let k = f < 0 ? -1 : (S.steps[f].kids.find(same) ?? -1);
+  if (k >= 0) Object.assign(S.steps[k], { sym, line, fline });
+  else k = addStep(id, f, line, sym, fline);
   setCur(k);
 }
 const go = (id) => { visitStep(id, null); select(id, { fly: true }); };
