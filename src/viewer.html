@@ -649,45 +649,53 @@ function branch() {
   for (let k = S.steps[S.cur].pick; k >= 0; k = S.steps[k].pick) p.push(k);
   return p;
 }
-// The step for a file on the current branch nearest to where you are (earlier steps win ties).
-function onBranch(id) {
-  const p = branch(), at = p.indexOf(S.cur);
-  let best = -1;
-  p.forEach((k, i) => { if (S.steps[k].id === id && (best < 0 || Math.abs(i - at) < Math.abs(best - at))) best = i; });
-  return best < 0 ? -1 : p[best];
-}
-function visitStep(id, line) {
-  const k = onBranch(id);
-  setCur(k >= 0 ? k : addStep(id, S.cur, line, null));
-}
 // The first line of the top-level item a line falls in.
 function regionOf(id, line) {
   let s = 0;
   for (const x of nodes[id].items) if (x.line <= line && x.line > s) s = x.line;
   return s;
 }
+// Whether a step's part of its file, its definition or where you left it for the next step `kid`,
+// holds the top-level item starting at line r.
+function holds(k, kid, r) {
+  const st = S.steps[k], f = kid >= 0 ? S.steps[kid].fline : null;
+  return (!!st.line && regionOf(st.id, st.line) === r) || (!!f && regionOf(st.id, f) === r);
+}
+// The step for a file on the current branch: one whose part of the file holds `line` when the file
+// appears more than once, else the nearest to where you are (earlier steps win ties).
+function onBranch(id, line) {
+  const p = branch(), at = p.indexOf(S.cur), r = line ? regionOf(id, line) : null;
+  let best = -1, held = false;
+  p.forEach((k, i) => {
+    if (S.steps[k].id !== id) return;
+    const h = r != null && holds(k, i + 1 < p.length ? p[i + 1] : -1, r);
+    if (best < 0 || (h && !held) || (h === held && Math.abs(i - at) < Math.abs(best - at))) { best = i; held = h; }
+  });
+  return best < 0 ? -1 : p[best];
+}
+function visitStep(id, line) {
+  const k = onBranch(id, line);
+  setCur(k >= 0 ? k : addStep(id, S.cur, line, null));
+}
 // <C-o> inside one buffer is not reported, so after jumps within a file the step you are back on is
-// unknown. Pick the nearest same-file step whose part of the file (its definition, or where you left it
-// for the next step) holds the line the jump started from.
+// unknown. Pick the nearest same-file step whose part of the file holds the line the jump started from.
 function sameFileStep(from, fline) {
   const r = regionOf(from, fline);
-  for (let k = S.cur, kid = -1; k >= 0 && S.steps[k].id === from; kid = k, k = S.steps[k].parent) {
-    const st = S.steps[k];
-    if ((st.line && regionOf(from, st.line) === r) || (kid >= 0 && S.steps[kid].fline && regionOf(from, S.steps[kid].fline) === r)) return k;
-  }
+  for (let k = S.cur, kid = -1; k >= 0 && S.steps[k].id === from; kid = k, k = S.steps[k].parent) if (holds(k, kid, r)) return k;
   return S.cur;
 }
 function jumpStep(from, fline, sym, id, line) {
   let f = S.cur;
   if (from != null && f >= 0 && S.steps[f].id === from) f = sameFileStep(from, fline);
   else if (from != null) {
-    f = onBranch(from);
+    f = onBranch(from, fline);
     if (f < 0) f = S.steps.findLastIndex((st) => st.id === from);
     if (f < 0) f = addStep(from, S.cur, fline, null);
   }
   // The same hop again: reuse it. A plain visit of the target that got here first: label it.
   const same = (c) => S.steps[c].id === id && ((S.steps[c].sym === sym && S.steps[c].line === line) || S.steps[c].sym == null);
   let k = f < 0 ? -1 : (S.steps[f].kids.find(same) ?? -1);
+  if (from == null) fline = null; // a line in a file outside the graph
   if (k >= 0) Object.assign(S.steps[k], { sym, line, fline });
   else k = addStep(id, f, line, sym, fline);
   setCur(k);
