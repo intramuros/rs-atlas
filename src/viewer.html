@@ -692,8 +692,8 @@ function jumpStep(from, fline, sym, id, line) {
     if (f < 0) f = S.steps.findLastIndex((st) => st.id === from);
     if (f < 0) f = addStep(from, S.cur, fline, null);
   }
-  // The same hop again: reuse it. A plain visit of the target that got here first: label it.
-  const same = (c) => S.steps[c].id === id && ((S.steps[c].sym === sym && S.steps[c].line === line) || S.steps[c].sym == null);
+  // The same hop again: reuse it. A plain visit of the same spot that got here first: label it.
+  const same = (c) => S.steps[c].id === id && S.steps[c].line === line && (S.steps[c].sym === sym || S.steps[c].sym == null);
   let k = f < 0 ? -1 : (S.steps[f].kids.find(same) ?? -1);
   if (from == null) fline = null; // a line in a file outside the graph
   if (k >= 0) Object.assign(S.steps[k], { sym, line, fline });
