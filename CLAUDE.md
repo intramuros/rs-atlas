@@ -18,12 +18,19 @@ writes a single-page interactive 3D viewer. See README.md for user-facing docs.
   handles `crate`/`self`/`super`/`::`, extern crates and 2015-edition crate-relative paths.
   `edges()` aggregates file->file edges with kinds `mod` / `use` / `path`.
 - `src/serve.rs`: std-only localhost HTTP server: `/` (viewer, live mode), `/visit`
-  (editor reports a file), `/events?since=N` (viewer polls), `/open?id=&line=` (runs
-  `nvim --server ADDR --remote-send`, only for files in the graph).
+  (editor reports a file; with `from`/`fline`/`sym` it is a go-to-definition jump),
+  `/events?since=N` (viewer polls; jumps carry a `jump` object), `/open?id=&line=` (runs
+  `nvim --server ADDR --remote-send`, only for files in the graph). Routing is
+  `State::route`, which the unit test calls directly.
+- `nvim/atlas.lua`: the Neovim side (`:Atlas`, `:AtlasStop`, a `gd` that reports jumps,
+  a BufEnter hook that reports visits). Copied or symlinked into the user's config.
 - `src/viewer.html`: the viewer, embedded with `include_str!`. Placeholders replaced by
   `render()`: `__PROJECT__`, `/*__GRAPH__*/null`, `/*__LIVE__*/false`, `/*__NVIM__*/false`.
   Uses 3d-force-graph 1.79.1 from jsDelivr (global `ForceGraph3D`). Crate labels and the
   trail are an HTML/SVG overlay projected with `graph2ScreenCoords` each frame.
+  The trail is a tree (`S.steps`, `S.cur`): jumps hang a labeled step under the step they
+  started from, visits and clicks move along or extend the current branch; the bar shows
+  one branch (`branch()`), the overlay draws them all.
   The file has no `<html>/<head>/<body>`; `render()` wraps it unless `--bare` is passed
   (bare output is for hosts that add their own document skeleton).
 
@@ -46,6 +53,8 @@ std/core/alloc, optional deps whose features are off, or crates beyond `--depth`
 - `#[cfg]` is ignored; all module files are included.
 - Macro- or build.rs-generated modules and items are invisible.
 - A file shared by two targets belongs to the first unit that loads it.
+- The trail lives in the viewer only; a reload rebuilds it from the server's events, but
+  steps added by clicking in the viewer are lost.
 - Possible next steps: rust-analyzer (SCIP/LSIF) for precise edges, cfg evaluation via
-  `cargo metadata` features, function-level nodes, a Neovim plugin wrapping the README
-  snippet, offline viewer (vendor the JS).
+  `cargo metadata` features, function-level nodes, trail export to the Neovim quickfix
+  list, offline viewer (vendor the JS).

@@ -10,8 +10,9 @@ a sphere. Edges show which file reaches into which.
   edge (`Glob, Override`), its top-level items, and its module path.
 - Narrow the view to 1, 2 or 3 hops around the selected file.
 - Every file you visit is strung onto a numbered trail, drawn through the 3D scene.
-- With `--serve`, the graph follows your jumps in Neovim (go-to-definition into a
-  dependency flies there), and "Open in Neovim" sends you back.
+- With `--serve`, the graph follows your jumps in Neovim, and "Open in Neovim" sends you
+  back. Go-to-definition builds a chain of the types you jump through, from your code up
+  through the crates it depends on, with a branch each time you go back and jump elsewhere.
 
 ## Install
 
@@ -47,46 +48,43 @@ engine from cdn.jsdelivr.net.
 
 ## Neovim
 
-Put this in your config. `:Atlas` starts the server for the project you are in, opens
-the browser and wires both directions; `:AtlasStop` stops it.
+`nvim/atlas.lua` connects Neovim and the viewer. It needs Neovim 0.10+ and `curl`.
+From the repo root, symlink it into your config (or copy it there):
 
-```lua
-local atlas = { url = "http://127.0.0.1:7878", job = nil }
-
-vim.api.nvim_create_user_command("Atlas", function()
-  if atlas.job then vim.ui.open(atlas.url) return end
-  local root = vim.fs.root(0, { "Cargo.lock", "Cargo.toml" }) or vim.fn.getcwd()
-  atlas.job = vim.system({
-    "rustgraph3d", root, "--serve", "7878",
-    "--nvim", vim.v.servername,
-    "-o", vim.fn.tempname() .. ".html",
-  }, {}, function() atlas.job = nil end)
-  vim.defer_fn(function() vim.ui.open(atlas.url) end, 2000)
-end, {})
-
-vim.api.nvim_create_user_command("AtlasStop", function()
-  if atlas.job then atlas.job:kill(15) end
-end, {})
-
-vim.api.nvim_create_autocmd("VimLeavePre", {
-  callback = function() if atlas.job then atlas.job:kill(15) end end,
-})
-
--- Report every Rust buffer you land on (gd, gr, :e, jumplist ...).
-vim.api.nvim_create_autocmd("BufEnter", {
-  pattern = "*.rs",
-  callback = function(ev)
-    if not atlas.job then return end
-    local file = vim.api.nvim_buf_get_name(ev.buf)
-    if file == "" then return end
-    vim.system({ "curl", "-s", "-m", "1", "-G", atlas.url .. "/visit",
-      "--data-urlencode", "file=" .. file,
-      "--data-urlencode", "line=" .. vim.fn.line(".") })
-  end,
-})
+```sh
+ln -s "$PWD/nvim/atlas.lua" ~/.config/nvim/plugin/atlas.lua
 ```
 
-Any editor can drive the trail: `GET /visit?file=<absolute path>&line=<n>`.
+- `:Atlas` maps the project you are in, serves it, and opens the browser once the graph is
+  built. `:AtlasStop` stops the server, which also stops when Neovim exits.
+- `gd` in a Rust buffer (bound when a language server attaches) goes to the definition and
+  adds the hop to the trail, labeled with the name it landed on. Keep jumping to follow a
+  type up the dependency tree: `main.rs → struct Searcher (grep-searcher) → trait Sink → …`.
+  Methods show as `Type::method`.
+- Every other Rust buffer you enter is reported too, so `<C-o>` and `<C-i>` move you back
+  and forth along the trail. A `gd` from an earlier step starts a new branch, and nothing
+  is dropped: the branch button on a step switches between branches, and **Copy** puts the
+  whole tree on the clipboard as indented text.
+- **Open in Neovim** in the viewer sends you back to the file, at the definition line when
+  you reached it with `gd`.
+
+Options, set in `init.lua`:
+
+```lua
+vim.g.atlas_port = 7878                           -- default
+vim.g.atlas_args = { "--depth", "3", "--prune" }  -- extra rustgraph3d flags
+vim.g.atlas_gd = "gd"  -- false: keep your own gd and map <Plug>(atlas-definition) yourself
+```
+
+A definition outside the graph (std, or a crate beyond `--depth`) shows a notice instead of
+a step: raise `--depth` to follow types further up. Pickers that jump on their own
+(Telescope and the like) show up as plain visits, without the name.
+
+Any editor can drive the trail:
+
+- `GET /visit?file=<absolute path>&line=<n>` reports a visit.
+- Adding `&from=<absolute path>&fline=<n>&sym=<name>` makes it a go-to-definition jump from
+  `from` that landed on `sym`.
 
 ## How edges are found
 
