@@ -88,26 +88,29 @@ local function definition()
   vim.lsp.buf.definition({
     on_list = function(t)
       local it = t.items[1]
-      if not it then return end
+      if not it or not vim.api.nvim_win_is_valid(win) then return end
       if #t.items > 1 then vim.fn.setqflist({}, " ", t) end
-      vim.cmd("normal! m'")
-      vim.fn.settagstack(win, { items = { { tagname = from.word, from = pos } } }, "t")
-      local dest = it.bufnr or vim.fn.bufadd(it.filename)
-      vim.bo[dest].buflisted = true
-      atlas.jumping = true -- this jump reports itself; skip the BufEnter visit
-      local ok, err = pcall(vim.api.nvim_win_set_buf, win, dest)
-      atlas.jumping = false
-      if not ok then return vim.notify(err, vim.log.levels.ERROR) end
-      vim.api.nvim_win_set_cursor(win, { it.lnum, math.max(it.col - 1, 0) })
-      vim.cmd("normal! zv")
-      local name = vim.fn.expand("<cword>")
-      report({
-        file = vim.api.nvim_buf_get_name(dest),
-        line = it.lnum,
-        from = from.file,
-        fline = from.line,
-        sym = name ~= "" and name or from.word,
-      })
+      -- The reply is async: jump in the window gd was pressed in, even if focus has moved since.
+      vim.api.nvim_win_call(win, function()
+        vim.cmd("normal! m'")
+        vim.fn.settagstack(win, { items = { { tagname = from.word, from = pos } } }, "t")
+        local dest = it.bufnr or vim.fn.bufadd(it.filename)
+        vim.bo[dest].buflisted = true
+        atlas.jumping = true -- this jump reports itself; skip the BufEnter visit
+        local ok, err = pcall(vim.api.nvim_win_set_buf, win, dest)
+        atlas.jumping = false
+        if not ok then return vim.notify(err, vim.log.levels.ERROR) end
+        vim.api.nvim_win_set_cursor(win, { it.lnum, math.max(it.col - 1, 0) })
+        vim.cmd("normal! zv")
+        local name = vim.fn.expand("<cword>")
+        report({
+          file = vim.api.nvim_buf_get_name(dest),
+          line = it.lnum,
+          from = from.file,
+          fline = from.line,
+          sym = name ~= "" and name or from.word,
+        })
+      end)
     end,
   })
 end
