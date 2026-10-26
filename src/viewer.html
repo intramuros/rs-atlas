@@ -4,7 +4,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,750&family=JetBrains+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;600&display=swap">
 <style>
-/* Layout: full-bleed 3D canvas; crate legend floats left, file inspector floats right, visit trail runs along the bottom.
+/* Layout: full-bleed 3D canvas; crate legend floats left, file inspector floats right, trail of hops runs along the bottom.
    On phones the legend becomes a drawer and the inspector a bottom sheet. */
 :root {
   --bg: #e7ebef;
@@ -183,10 +183,19 @@ button { cursor: pointer; }
 .step { flex: none; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--panel-solid); border-radius: 999px; padding: 2px 9px 2px 3px; font: 12px var(--font-code); }
 .step b { display: inline-grid; place-items: center; min-width: 18px; height: 18px; border-radius: 999px; background: var(--accent); color: var(--panel-solid); font: 600 10.5px var(--font-ui); padding: 0 4px; box-sizing: border-box; }
 .step.cur { border-color: var(--accent); }
+.step .k { font-size: 10px; color: var(--muted); }
+.step .sym { font-weight: 500; }
+.step .f { font-size: 11px; color: var(--muted); }
 .arrow { flex: none; color: var(--faint); font-size: 12px; }
+.xc { flex: none; display: inline-flex; align-items: center; gap: 5px; font: 600 11px/1 var(--font-ui); color: var(--muted); white-space: nowrap; }
+.xc .sw { width: 8px; height: 8px; border-radius: 50%; }
+.fork { flex: none; display: inline-flex; align-items: center; gap: 3px; border: 1px dashed var(--line); background: transparent; border-radius: 999px; padding: 1px 7px 1px 5px; font: 11px var(--font-code); color: var(--muted); }
+.fork:hover { color: var(--fg); border-color: var(--muted); }
+.fork svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+#trailsvg .hop { font: 500 11px var(--font-code); fill: var(--accent); stroke: var(--bg); stroke-width: 3px; paint-order: stroke; text-anchor: middle; }
 #trail .hint { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-#toast { position: absolute; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); padding: 7px 12px; font-size: 12.5px; z-index: 20; max-width: calc(100% - 48px); }
+#toast { position: absolute; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); padding: 7px 12px; font-size: 12.5px; z-index: 20; max-width: calc(100% - 48px); white-space: pre-wrap; }
 
 .float-tooltip-kap, .scene-tooltip {
   font: 12px/1.4 var(--font-ui) !important; color: var(--fg) !important; background: var(--panel-solid) !important;
@@ -255,6 +264,7 @@ button { cursor: pointer; }
 <div id="trail" class="panel">
   <span class="lbl">Trail <span id="live" hidden><i></i>following editor</span></span>
   <div id="steps"></div>
+  <button class="btn" id="copy-trail" hidden title="Copy every branch of the trail as indented text">Copy</button>
   <button class="btn" id="clear" hidden>Clear</button>
 </div>
 <div id="toast" class="panel" hidden role="status"></div>
@@ -291,7 +301,8 @@ const S = {
   deps: true,
   labels: store.get("labels", true),
   hidden: new Set(),
-  trail: [],
+  steps: [],            // trail tree: { id, line, sym, parent, kids, pick }
+  cur: -1,              // the step you are on
   hopSet: null,
   hl: new Set(),
 };
@@ -429,7 +440,7 @@ const G = new ForceGraph3D(el, { controlType: "orbit" })
   .enableNodeDrag(false)
   .warmupTicks(40)
   .cooldownTicks(260)
-  .onNodeClick((n) => select(n.id, { fly: true }))
+  .onNodeClick((n) => go(n.id))
   .onBackgroundClick(() => { if (S.sel != null || S.crate != null) { S.sel = null; S.crate = null; S.hops && setHops(0); refresh(); } });
 G.d3Force("cluster", clusterForce());
 G.d3Force("charge").strength(-28);
@@ -469,13 +480,11 @@ function flyToCrate(ci) {
   G.cameraPosition({ x: c.x * k, y: c.y * k + 1, z: c.z * k }, c, 900);
 }
 
-function select(id, { fly = false, fromEditor = false, line = null } = {}) {
+function select(id, { fly = false, line = null } = {}) {
   S.sel = id; S.crate = null;
   const n = nodes[id];
   if (S.hidden.has(n.pkg)) S.hidden.delete(n.pkg);
   if (!S.deps && !crates[n.pkg].ws) { S.deps = true; $("#t-deps").setAttribute("aria-pressed", "true"); }
-  if (S.trail[S.trail.length - 1] !== id) S.trail.push(id);
-  if (S.trail.length > 40) S.trail.shift();
   S.selLine = line;
   refresh();
   if (fly) flyTo(n);
@@ -528,6 +537,7 @@ $("#legend").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.tar
 
 // ---------- inspector ----------
 const KIND_ORDER = ["mod", "trait", "struct", "enum", "type", "fn", "macro", "const", "static", "union", "impl", "use", "extern crate"];
+const role = (c) => (c.ws ? "workspace" : c.depth === 1 ? "direct dependency" : "dependency, depth " + c.depth);
 let showAll = { out: false, inc: false, items: false };
 function edgeRows(list, dir) {
   const key = dir === "out" ? "t" : "s";
@@ -555,7 +565,7 @@ function renderInspector() {
     if (c) {
       const files = nodes.filter((n) => n.pkg === S.crate).sort((a, b) => b.loc - a.loc);
       body.innerHTML = `<div class="pad">
-        <div class="crumb"><span class="pill"><span class="sw" style="background:${swatch(S.crate)}"></span>${esc(c.name)} ${esc(c.version)}</span>${c.ws ? "workspace" : c.depth === 1 ? "direct dependency" : "dependency, depth " + c.depth}</div>
+        <div class="crumb"><span class="pill"><span class="sw" style="background:${swatch(S.crate)}"></span>${esc(c.name)} ${esc(c.version)}</span>${role(c)}</div>
         <div class="fpath" style="margin-top:10px">${fmt(c.files)} files · ${fmt(c.loc)} lines</div>
         <div class="abs">${esc(c.dir)}</div></div>
         <div class="pad sec"><h3><span class="lbl">Largest files</span></h3><div class="edges">${files.slice(0, 30).map((n) =>
@@ -574,7 +584,7 @@ function renderInspector() {
   const ilim = showAll.items ? items.length : 40;
   const line = S.selLine || 1;
   body.innerHTML = `<div class="pad">
-      <div class="crumb"><span class="pill"><span class="sw" style="background:${swatch(n.pkg)}"></span>${esc(c.name)} ${esc(c.version)}</span>${c.ws ? "workspace" : c.depth === 1 ? "direct dependency" : "dependency, depth " + c.depth}${n.target !== c.name.replace(/-/g, "_") ? ` · target ${esc(n.target)}` : ""}</div>
+      <div class="crumb"><span class="pill"><span class="sw" style="background:${swatch(n.pkg)}"></span>${esc(c.name)} ${esc(c.version)}</span>${role(c)}${n.target !== c.name.replace(/-/g, "_") ? ` · target ${esc(n.target)}` : ""}</div>
       <div class="fpath">${esc(n.path)}</div>
       <div class="fmod">${esc(n.mod)}</div>
       <div class="figures">
@@ -597,8 +607,8 @@ function renderInspector() {
     </div>`;
 }
 const cmdFor = (n, line) => `nvim +${line} '${n.abs.replace(/'/g, "'\\''")}'`;
-async function copy(text) {
-  try { await navigator.clipboard.writeText(text); toast("Copied: " + text); }
+async function copy(text, what) {
+  try { await navigator.clipboard.writeText(text); toast("Copied" + (what ? " " + what : ": " + text)); }
   catch { toast(text, true); }
 }
 function openInEditor(n, line) {
@@ -608,7 +618,7 @@ $("#insp-body").addEventListener("click", (e) => {
   const t = e.target.closest("button, [data-go]");
   if (!t) return;
   const n = S.sel != null ? nodes[S.sel] : null;
-  if (t.dataset.go != null) { showAll = { out: false, inc: false, items: false }; select(+t.dataset.go, { fly: true }); }
+  if (t.dataset.go != null) { showAll = { out: false, inc: false, items: false }; go(+t.dataset.go); }
   else if (t.dataset.more) { showAll[t.dataset.more] = true; renderInspector(); }
   else if (t.dataset.open && n) openInEditor(n, +t.dataset.open);
   else if (t.dataset.copy && n) copy(cmdFor(n, +t.dataset.copy));
@@ -617,23 +627,112 @@ $("#insp-body").addEventListener("click", (e) => {
 });
 $("#right").addEventListener("click", (e) => { if (e.target === $("#right")) $("#right").classList.toggle("collapsed"); });
 
-// ---------- trail ----------
+// ---------- trail: a tree of steps ----------
+// A go-to-definition jump from the editor hangs a step, labeled with the name it landed on, under the step
+// it started from. Plain visits and clicks move along the branch you are on when the file is already there
+// (the jumplist), and extend it otherwise. Jumping again from an earlier step starts a new branch, so
+// nothing explored is lost. The bar shows one branch: root → current step → where you came back from.
+function addStep(id, parent, line, sym) {
+  S.steps.push({ id, line, sym, parent, kids: [], pick: -1 });
+  const k = S.steps.length - 1;
+  if (parent >= 0) S.steps[parent].kids.push(k);
+  return k;
+}
+function setCur(k) {
+  S.cur = k;
+  for (let c = k, p = S.steps[k].parent; p >= 0; c = p, p = S.steps[p].parent) S.steps[p].pick = c;
+}
+function branch() {
+  if (S.cur < 0) return [];
+  const p = [];
+  for (let k = S.cur; k >= 0; k = S.steps[k].parent) p.unshift(k);
+  for (let k = S.steps[S.cur].pick; k >= 0; k = S.steps[k].pick) p.push(k);
+  return p;
+}
+// The step for a file on the current branch nearest to where you are (earlier steps win ties).
+function onBranch(id) {
+  const p = branch(), at = p.indexOf(S.cur);
+  let best = -1;
+  p.forEach((k, i) => { if (S.steps[k].id === id && (best < 0 || Math.abs(i - at) < Math.abs(best - at))) best = i; });
+  return best < 0 ? -1 : p[best];
+}
+function visitStep(id, line) {
+  const k = onBranch(id);
+  setCur(k >= 0 ? k : addStep(id, S.cur, line, null));
+}
+function jumpStep(from, fline, sym, id, line) {
+  let f = S.cur;
+  if (from != null && (f < 0 || S.steps[f].id !== from)) {
+    f = onBranch(from);
+    if (f < 0) f = S.steps.findLastIndex((st) => st.id === from);
+    if (f < 0) f = addStep(from, S.cur, fline, null);
+  }
+  // The same hop again: reuse it. A plain visit of the target that got here first: label it.
+  let k = f < 0 ? -1 : (S.steps[f].kids.find((c) => S.steps[c].id === id && (S.steps[c].sym === sym || S.steps[c].sym == null)) ?? -1);
+  if (k >= 0) Object.assign(S.steps[k], { sym, line });
+  else k = addStep(id, f, line, sym);
+  setCur(k);
+}
+const go = (id) => { visitStep(id, null); select(id, { fly: true }); };
+const goStep = (k) => { setCur(k); select(S.steps[k].id, { fly: true, line: S.steps[k].line }); };
+
+// What a jump landed on: the top-level item at its line (items start at their attributes, so the last one
+// at or before it). A method shows as Type::name when its impl is inherent.
+function defOf(st) {
+  if (!st.sym) return null;
+  let it = null;
+  for (const x of nodes[st.id].items) if (x.line <= st.line && (!it || x.line > it.line)) it = x;
+  if (it && it.name.replace(/!$/, "") === st.sym) return { kind: it.kind, label: st.sym, ctx: "" };
+  if (it && it.kind === "impl") return { kind: "", label: it.name.includes(" for ") ? st.sym : it.name + "::" + st.sym, ctx: "impl " + it.name };
+  return { kind: "", label: st.sym, ctx: "" };
+}
+const forkIcon = '<svg viewBox="0 0 16 16"><circle cx="4" cy="3" r="1.6"/><circle cx="4" cy="13" r="1.6"/><circle cx="12" cy="4.5" r="1.6"/><path d="M4 4.6v6.8M12 6.1c0 3.4-8 2.6-8 5.3"/></svg>';
 function renderTrail() {
-  const steps = S.trail;
-  $("#clear").hidden = !steps.length;
-  if (!steps.length) {
-    $("#steps").innerHTML = `<span class="hint">${LIVE ? "Jump around in Neovim and your path shows up here and in the graph." : "Files you select are strung together here, in order, and drawn as a path in the graph."}</span>`;
+  const p = branch();
+  $("#clear").hidden = $("#copy-trail").hidden = !p.length;
+  if (!p.length) {
+    $("#steps").innerHTML = `<span class="hint">${LIVE ? "Go to definition in Neovim: each hop, and the name it landed on, is chained here and drawn in the graph." : "Files you select are strung together here, in order, and drawn as a path in the graph."}</span>`;
     return;
   }
-  $("#steps").innerHTML = steps.map((id, k) => {
-    const n = nodes[id];
-    const short = crates[n.pkg].name + "/" + n.path.split("/").pop();
-    return `${k ? '<span class="arrow">→</span>' : ""}<button class="step${id === S.sel ? " cur" : ""}" data-go="${id}" title="${esc(crates[n.pkg].name)} · ${esc(n.path)}"><b>${k + 1}</b>${esc(short)}</button>`;
+  $("#steps").innerHTML = p.map((k, i) => {
+    const st = S.steps[k], n = nodes[st.id], c = crates[n.pkg], d = defOf(st);
+    const crossed = !i || nodes[S.steps[p[i - 1]].id].pkg !== n.pkg;
+    const title = `${d && d.ctx ? "in " + d.ctx + " · " : ""}${c.name} › ${n.path}${st.line ? ":" + st.line : ""}`;
+    return (i ? '<span class="arrow">→</span>' : "")
+      + (crossed ? `<span class="xc" title="${esc(c.name)} ${esc(c.version)} · ${role(c)}"><span class="sw" style="background:${swatch(n.pkg)}"></span>${esc(c.name)}</span>` : "")
+      + `<button class="step${k === S.cur ? " cur" : ""}" data-step="${k}" title="${esc(title)}"><b>${i + 1}</b>`
+      + (d ? `${d.kind ? `<span class="k">${esc(d.kind)}</span>` : ""}<span class="sym">${esc(d.label)}</span><span class="f">${esc(n.path.split("/").pop())}</span>` : esc(n.path.split("/").pop()))
+      + "</button>"
+      + (st.kids.length > 1 ? `<button class="fork" data-fork="${k}" title="${st.kids.length} branches from here: switch to the next">${forkIcon}${st.kids.length}</button>` : "");
   }).join("");
-  const s = $("#steps"); s.scrollLeft = s.scrollWidth;
+  const cur = $("#steps .step.cur");
+  if (cur) cur.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
-$("#steps").addEventListener("click", (e) => { const t = e.target.closest("[data-go]"); if (t) select(+t.dataset.go, { fly: true }); });
-$("#clear").addEventListener("click", () => { S.trail = []; renderTrail(); });
+function nextBranch(k) {
+  const kids = S.steps[k].kids, p = branch();
+  const i = (kids.indexOf(p[p.indexOf(k) + 1]) + 1) % kids.length;
+  goStep(kids[i]);
+  toast(`Branch ${i + 1} of ${kids.length}`);
+}
+// Every branch as indented text: "struct Searcher  grep-searcher › src/searcher/mod.rs:560".
+function trailText() {
+  const lines = [];
+  const walk = (k, depth) => {
+    const st = S.steps[k], n = nodes[st.id], d = defOf(st);
+    lines.push(`${"  ".repeat(depth)}${depth ? "→ " : ""}${d ? `${d.kind ? d.kind + " " : ""}${d.label}  ` : ""}${crates[n.pkg].name} › ${n.path}${st.line ? ":" + st.line : ""}`);
+    for (const c of st.kids) walk(c, depth + 1);
+  };
+  S.steps.forEach((st, k) => { if (st.parent < 0) walk(k, 0); });
+  return lines.join("\n");
+}
+$("#steps").addEventListener("click", (e) => {
+  const f = e.target.closest("[data-fork]");
+  if (f) return nextBranch(+f.dataset.fork);
+  const t = e.target.closest("[data-step]");
+  if (t) goStep(+t.dataset.step);
+});
+$("#copy-trail").addEventListener("click", () => copy(trailText(), "the trail"));
+$("#clear").addEventListener("click", () => { S.steps = []; S.cur = -1; renderTrail(); });
 
 // ---------- overlay: crate labels + trail path, projected every frame ----------
 const labelsEl = $("#labels"), svg = $("#trailsvg");
@@ -669,22 +768,32 @@ function frame() {
     const focus = S.sel != null ? nodes[S.sel].pkg === i || [...S.hl].some((id) => nodes[id].pkg === i) : S.crate == null || S.crate === i;
     d.classList.toggle("dim", !focus);
   });
-  // trail path
-  const pts = S.trail.map((id) => nodes[id]).filter((n) => n.x != null && nodeOn(n));
+  // trail: every branch faintly; the bar's branch numbered, with the name each jump landed on
   let h = "";
-  if (pts.length) {
-    const acc = TOK.accent;
-    const proj = pts.map((n) => ({ ...G.graph2ScreenCoords(n.x, n.y, n.z), f: inFront(n) }));
-    for (let k = 1; k < proj.length; k++) {
-      const a = proj[k - 1], b = proj[k];
-      if (!a.f || !b.f) continue;
-      h += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${acc}" stroke-width="1.6" stroke-dasharray="5 4" stroke-opacity="0.85"/>`;
-    }
-    proj.forEach((p, k) => {
-      if (!p.f) return;
-      const idx = S.trail.length - pts.length + k + 1;
-      h += `<circle cx="${p.x}" cy="${p.y}" r="8.5" fill="${acc}" fill-opacity="0.92"/><text x="${p.x}" y="${p.y + 3.5}" text-anchor="middle" font-size="10" font-weight="600" font-family="Schibsted Grotesk, system-ui, sans-serif" fill="${TOK.panel}">${idx}</text>`;
+  if (S.steps.length) {
+    const acc = TOK.accent, p = branch(), on = new Set(p), proj = new Map();
+    const at = (id) => {
+      if (!proj.has(id)) { const n = nodes[id]; proj.set(id, n.x != null && nodeOn(n) && inFront(n) ? G.graph2ScreenCoords(n.x, n.y, n.z) : null); }
+      return proj.get(id);
+    };
+    let names = "";
+    S.steps.forEach((st, k) => {
+      const from = st.parent >= 0 ? S.steps[st.parent].id : st.id;
+      const a = at(from), b = at(st.id);
+      if (from === st.id || !a || !b) return;
+      const mine = on.has(k);
+      h += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${acc}" stroke-width="${mine ? 1.6 : 1}" stroke-dasharray="5 4" stroke-opacity="${mine ? 0.85 : 0.3}"/>`;
+      if (mine && st.sym) names += `<text class="hop" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 6}">${esc(st.sym)}</text>`;
     });
+    // A file reached more than once on the branch carries every number.
+    const nums = new Map();
+    p.forEach((k, i) => { const id = S.steps[k].id; nums.set(id, nums.has(id) ? nums.get(id) + "," + (i + 1) : String(i + 1)); });
+    for (const [id, label] of nums) {
+      const c = at(id);
+      if (!c) continue;
+      h += `<circle cx="${c.x}" cy="${c.y}" r="${8.5 + (label.length - 1) * 2.8}" fill="${acc}" fill-opacity="0.92"/><text x="${c.x}" y="${c.y + 3.5}" text-anchor="middle" font-size="10" font-weight="600" font-family="Schibsted Grotesk, system-ui, sans-serif" fill="${TOK.panel}">${label}</text>`;
+    }
+    h += names;
   }
   svg.innerHTML = h;
   requestAnimationFrame(frame);
@@ -722,12 +831,12 @@ q.addEventListener("keydown", (e) => {
     cursor = (cursor + (e.key === "ArrowDown" ? 1 : -1) + hits.length) % Math.max(hits.length, 1);
     [...res.children].forEach((c, k) => c.classList.toggle("on", k === cursor));
   } else if (e.key === "Enter" && hits[cursor]) {
-    select(hits[cursor].id, { fly: true }); q.value = ""; res.hidden = true; q.blur();
+    go(hits[cursor].id); q.value = ""; res.hidden = true; q.blur();
   } else if (e.key === "Escape") { q.value = ""; res.hidden = true; q.blur(); }
 });
 res.addEventListener("mousedown", (e) => {
   const t = e.target.closest("[data-go]");
-  if (t) { e.preventDefault(); select(+t.dataset.go, { fly: true }); q.value = ""; res.hidden = true; q.blur(); }
+  if (t) { e.preventDefault(); go(+t.dataset.go); q.value = ""; res.hidden = true; q.blur(); }
 });
 q.addEventListener("blur", () => setTimeout(() => (res.hidden = true), 120));
 
@@ -790,8 +899,15 @@ if (LIVE) {
     misses = 0;
     for (const ev of evs) {
       since = ev.seq;
-      if (ev.id != null) select(ev.id, { fly: true, fromEditor: true, line: ev.line });
-      else toast("Not in this graph: " + ev.file.split("/").slice(-3).join("/"));
+      const j = ev.jump;
+      if (ev.id == null) {
+        const where = ev.file.split("/").slice(-3).join("/");
+        toast(j ? `${j.sym} is defined outside this graph (${where}). Std and crates beyond --depth are not mapped.` : "Not in this graph: " + where);
+        continue;
+      }
+      if (j) jumpStep(j.from, j.line, j.sym, ev.id, ev.line);
+      else visitStep(ev.id, ev.line);
+      select(ev.id, { fly: true, line: ev.line });
     }
   }).catch(() => { if (++misses === 3) { $("#live").hidden = true; toast("Lost the connection to the atlas server."); } })
     .finally(() => setTimeout(poll, misses >= 3 ? 4000 : 450));
@@ -802,6 +918,6 @@ if (LIVE) {
 renderLegend();
 const main = wsIdx.slice().sort((a, b) => crates[b].files - crates[a].files)[0];
 const entry = nodes.filter((n) => n.pkg === main && n.root).sort((a, b) => out[b.id].length - out[a.id].length)[0];
-if (entry && !LIVE) { S.sel = entry.id; S.trail = []; refresh(); } else refresh();
+if (entry && !LIVE) { S.sel = entry.id; refresh(); } else refresh();
 })();
 </script>
